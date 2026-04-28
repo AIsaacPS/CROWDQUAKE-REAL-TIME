@@ -1,0 +1,70 @@
+================================================================================
+COMPARACIÓN DE MÉTRICAS: RE-ENTRENAMIENTO CON DATASET AMPLIADO
+Fecha: 27 de abril de 2026
+================================================================================
+
+DATASET
+─────────────────────────────────────────────────────────────────────────────
+                          Anterior (24/abr)     Nuevo (27/abr)
+Archivos CSV totales      262                   1,433
+Eventos EQ válidos        158                   680              (4.3x más)
+Ventanas EQ               1,422                 6,120            (4.3x más)
+Archivos NonEQ            79                    79               (sin cambio)
+Ventanas NonEQ            49,732                49,732           (sin cambio)
+Carpetas EQ usadas        EQ-2024, EQ-2025-2026 EQ-2011 a EQ-2025-2026 (9 carpetas)
+
+CRNN — MODELO PRINCIPAL
+─────────────────────────────────────────────────────────────────────────────
+Métrica              Anterior (158 EQ)    Nuevo (680 EQ)       Cambio
+─────────────────────────────────────────────────────────────────────────────
+AUROC                0.9990               0.9998               +0.0008 ↑
+Accuracy             99.77%               99.73%               -0.04% (≈igual)
+Precision (EQ)       96.49%               98.38%               +1.89% ↑
+Recall (EQ)          95.37%               99.13%               +3.76% ↑
+F1 (EQ)              95.93%               98.75%               +2.82% ↑
+Precision (NonEQ)    99.95%               99.89%               -0.06% (≈igual)
+Recall (NonEQ)       99.93%               99.80%               -0.13% (≈igual)
+─────────────────────────────────────────────────────────────────────────────
+
+ANN — BASELINE
+─────────────────────────────────────────────────────────────────────────────
+Métrica              Anterior (158 EQ)    Nuevo (680 EQ)       Cambio
+─────────────────────────────────────────────────────────────────────────────
+AUROC                0.9613               0.9476               -0.0137 ↓
+Accuracy             91.43%               74.39%               -17.04% ↓
+Precision (EQ)       23.50%               29.37%               +5.87% ↑
+Recall (EQ)          90.74%               95.21%               +4.47% ↑
+─────────────────────────────────────────────────────────────────────────────
+
+RESUMEN
+================================================================================
+
+El re-entrenamiento con el dataset ampliado (680 eventos sísmicos vs. 158
+del ciclo anterior) produjo mejoras significativas en el modelo CRNN:
+
+- Precision EQ subió de 96.49% a 98.38%: cuando el modelo dice "sismo",
+  tiene razón el 98.4% de las veces. Esto significa menos falsas alarmas,
+  lo cual es crítico para un sistema de alerta temprana donde cada falsa
+  alarma erosiona la confianza del usuario.
+
+- Recall EQ subió de 95.37% a 99.13%: el modelo ahora detecta el 99.1%
+  de los sismos reales, fallando solo en el 0.87% de los eventos. Para
+  alerta temprana, no perder sismos es la prioridad número uno.
+
+- AUROC de 0.9998: prácticamente perfecto. Este valor es comparable con
+  los mejores resultados del paper original de CrowdQuake (KDD 2020),
+  que usó 8,973 eventos. Con solo 680 eventos ya alcanzamos rendimiento
+  de nivel publicación.
+
+- El F1 de 98.75% confirma un excelente balance entre precision y recall,
+  lo que indica que el modelo está listo para pruebas en tiempo real.
+
+El ANN baseline empeoró con más datos (AUROC 0.9613 → 0.9476, Accuracy
+91.43% → 74.39%), confirmando que las 3 features manuales (IQR, ZC, CAV)
+no capturan la complejidad de los patrones sísmicos tan bien como la CRNN,
+que aprende directamente de la forma de onda cruda. Esto valida la decisión
+de usar la CRNN como modelo principal para el sistema de detección.
+
+Próximo paso: integrar el modelo CRNN_100Hz_10s.h5 en el sistema de
+detección en tiempo real con el ADXL335 y la lógica STA/LTA → CRNN.
+================================================================================

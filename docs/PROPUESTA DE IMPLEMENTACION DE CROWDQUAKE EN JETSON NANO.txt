@@ -1,0 +1,284 @@
+================================================================================
+IMPLEMENTACIÓN DE CROWDQUAKE EN JETSON NANO
+Sistema de Detección Sísmica en Tiempo Real con CRNN
+================================================================================
+Fecha: 23 de abril de 2026
+Hardware: ADXL335 + Arduino Uno + NVIDIA Jetson Nano
+Referencia: CrowdQuake (KDD 2020) - Huang, Lee, Kwon, Lee
+================================================================================
+
+
+1. OBJETIVO
+================================================================================
+
+Construir un sistema de detección sísmica en tiempo real que corra en una
+NVIDIA Jetson Nano, usando un acelerómetro ADXL335 como sensor y una red
+neuronal CRNN (Convolutional Recurrent Neural Network) como clasificador.
+
+El sistema opera en dos niveles:
+
+  NIVEL 1 — STA/LTA: monitoreo continuo de la señal sísmica. Detecta
+  cambios abruptos en la energía de la señal y activa la evaluación IA.
+
+  NIVEL 2 — CRNN: recibe una ventana de 2 segundos de datos raw y
+  determina si la anomalía detectada por STA/LTA corresponde a un
+  terremoto real o a ruido (tráfico, actividad humana, golpes, etc.).
+
+Latencia objetivo: ~2 segundos desde el inicio de la onda P hasta la
+emisión de la alerta.
+
+
+2. ESTADO ACTUAL
+================================================================================
+
+2.1 PIPELINE DE ENTRENAMIENTO (OPERATIVO)
+--------------------------------------------------------------------------------
+
+Se completó el primer ciclo de entrenamiento y validación. El pipeline
+está automatizado y listo para re-entrenar con datos adicionales:
+
+  - convert_knet_csv.py: convierte datos K-NET CSV de NIED a formato
+    de entrenamiento. Detecta automáticamente todas las carpetas EQ-*
+    en DATA/. Filtro configurable por PGA (default > 0.05g).
+
+  - CRNN.py: entrenamiento del modelo CRNN, adaptado a TensorFlow 2.13.
+
+  - ANN.py: entrenamiento del modelo ANN baseline para comparación.
+
+  - plot_results.py: genera curvas ROC, Precision-Recall, matrices de
+    confusión y distribución de probabilidades.
+
+  - run_training.sh: ejecuta el pipeline completo (conversión →
+    entrenamiento CRNN → entrenamiento ANN).
+
+2.2 DATASET ACTUAL
+--------------------------------------------------------------------------------
+
+  Terremotos:
+    - 262 archivos K-NET CSV (EQ-2024: 161, EQ-2025-2026: 101)
+    - 158 pasan el filtro PGA > 0.05g → convertidos a .txt
+    - 1,422 ventanas de entrenamiento generadas
+
+  No-terremotos:
+    - 79 archivos del dataset original de CrowdQuake
+    - 8 categorías: Bus, DroppingDesk, Floor, Outdoor,
+      ShakingDesk, Stay, Walking
+    - 49,732 ventanas de entrenamiento generadas
+
+2.3 RESULTADOS DEL ENTRENAMIENTO PRELIMINAR
+--------------------------------------------------------------------------------
+
+  Configuración: SamplingRate=100 Hz, Duration=10 s, 100 epochs
+
+  Métrica              CRNN          ANN (baseline)
+  ─────────────────────────────────────────────────
+  AUROC                0.9990        0.9613
+  Accuracy             99.77%        91.43%
+  Precision (EQ)       96.49%        23.50%
+  Recall (EQ)          95.37%        90.74%
+  F1 (EQ)              95.93%        37.33%
+  False alarm rate     0.10%         8.56%
+  ─────────────────────────────────────────────────
+
+  La CRNN supera ampliamente al ANN. El AUROC de 0.999 es comparable
+  con los resultados del paper original (>0.99 con 8,973 eventos).
+
+  Modelo generado: result/CRNN_100Hz_10s.h5 (4 MB)
+
+2.4 LO QUE FALTA
+--------------------------------------------------------------------------------
+
+  a) Entrenamiento final con dataset ampliado:
+     El modelo actual se entrenó con 158 eventos sísmicos. Para un
+     despliegue en producción se necesita al menos el doble (≥316).
+     El paper original usó 8,973 eventos.
+
+  b) Sistema de detección en tiempo real:
+     El modelo entrenado existe como archivo .h5 pero aún no hay
+     código que lo ejecute en tiempo real sobre datos del ADXL335.
+
+
+3. ARQUITECTURA DEL SISTEMA EN TIEMPO REAL
+================================================================================
+
+3.1 FLUJO DE DATOS
+--------------------------------------------------------------------------------
+
+  ADXL335 → Arduino Uno (115200 baud, 200 Hz) → Jetson Nano
+                                                     │
+                                                     ├─→ Buffer RAW (sin filtro)
+                                                     │     └─ Downsample 200→100 Hz
+                                                     │     └─ Alimenta CRNN
+                                                     │
+                                                     └─→ Buffer FILTRADO (Butterworth 0.1-10 Hz)
+                                                           └─ Alimenta STA/LTA
+
+3.2 LÓGICA DE DETECCIÓN
+--------------------------------------------------------------------------------
+
+  Modo IDLE (estado normal):
+    - STA/LTA monitorea continuamente sobre datos filtrados a 200 Hz
+    - CRNN inactiva (no consume recursos)
+
+  Modo ANOMALÍA (STA/LTA disparó):
+    - CRNN evalúa ventana de 2s de datos RAW a 100 Hz cada segundo
+    - Si CRNN ≥ 0.5 → pasa a modo ALERTA
+    - Si CRNN < 0.5 durante N evaluaciones consecutivas → vuelve a IDLE
+
+  Modo ALERTA (sismo confirmado):
+    - Registrar evento (PGA, duración, timestamp)
+    - Emitir alerta por MQTT
+    - Continuar monitoreando hasta que STA/LTA se desactive
+
+3.3 COMPATIBILIDAD HARDWARE ↔ MODELO
+--------------------------------------------------------------------------------
+
+  Aspecto              Nuestro hardware              Lo que espera la CRNN
+  ──────────────────────────────────────────────────────────────────────
+  Sampling rate        200 Hz                         100 Hz
+  Componentes          3 ejes (X, Y, Z)              3 ejes (X, Y, Z)
+  Unidades             g                              g
+  Pre-filtro           Butterworth 0.1-10 Hz          Ninguno (datos raw)
+  Ventana              —                              2s = 200 muestras
+  Tensor de entrada    —                              (1, 2, 100, 3)
+  ──────────────────────────────────────────────────────────────────────
+
+  Resolución:
+    - Downsamplear de 200→100 Hz (tomar 1 de cada 2 muestras)
+    - Mantener rama de datos RAW sin filtro para la CRNN
+    - El filtro Butterworth se usa exclusivamente para STA/LTA
+    - No normalizar los datos; la CRNN espera valores en g directamente
+
+3.4 COMPONENTES A DESARROLLAR
+--------------------------------------------------------------------------------
+
+  a) Buffer RAW paralelo:
+     - deque circular de 200 muestras (2s @ 100 Hz, 3 ejes)
+     - Datos en g sin filtrar, downsampleados de 200→100 Hz
+     - Se actualiza continuamente
+
+  b) Clase CrowdQuakeCRNN:
+     - Carga modelo .h5 (o TFLite optimizado)
+     - Método predict(buffer_raw):
+       1. Toma 200 muestras × 3 componentes
+       2. Reshape a (1, 2, 100, 3)
+       3. Ejecuta inferencia
+       4. Retorna probabilidad [0, 1]
+
+  c) Integración en el loop principal:
+     - STA/LTA dispara → activar evaluación CRNN cada 1 segundo
+     - CRNN ≥ 0.5 → confirmar sismo, emitir alerta
+     - CRNN < 0.5 → descartar, fue ruido
+
+  d) Emisión de alertas (MQTT):
+     {
+       "station_id": "SKYALRT-001",
+       "event": "EARTHQUAKE",
+       "crnn_probability": 0.95,
+       "pga_gals": 15.3,
+       "timestamp_utc": "2026-04-23T15:45:12.345Z",
+       "detection_latency_ms": 2020
+     }
+
+3.5 PRESUPUESTO DE LATENCIA
+--------------------------------------------------------------------------------
+
+  Componente                          Latencia
+  ─────────────────────────────────────────────
+  Adquisición ADXL335 → Arduino       ~5 ms
+  Transmisión serial → Jetson         ~3 ms
+  STA/LTA (trigger)                   ~0 ms
+  Acumulación de ventana CRNN         2000 ms
+  Inferencia CRNN en Jetson           ~10 ms
+  Decisión + emisión de alerta        ~2 ms
+  ─────────────────────────────────────────────
+  TOTAL (desde inicio de onda P)      ~2020 ms
+
+3.6 PRESUPUESTO DE MEMORIA (JETSON NANO, 4 GB)
+--------------------------------------------------------------------------------
+
+  Sistema operativo + servicios:       ~1.2 GB
+  TensorFlow runtime:                  ~300 MB
+  CRNN modelo:                         ~4 MB
+  Buffers de datos:                    ~50 MB
+  Python + librerías:                  ~200 MB
+  ─────────────────────────────────────────────
+  TOTAL ESTIMADO:                      ~1.8 GB
+  DISPONIBLE:                          ~2.2 GB
+
+  El modelo CRNN es pequeño y puede correr en CPU sin problema.
+  No se requiere GPU dedicada para la inferencia.
+
+
+4. LIMITACIONES
+================================================================================
+
+  ADXL335:
+    - Ruido ~150 μg/√Hz, limita detección de sismos < MMI III
+    - ADC del Arduino (10 bits) agrega ruido de cuantización
+    - Mejora posible: ADC externo de 16 bits (ADS1115)
+
+  Arduino Uno:
+    - Jitter del timer a 200 Hz con 3 canales + Serial
+    - Usar interrupciones por Timer1 para muestreo uniforme
+
+  Jetson Nano:
+    - 4 GB RAM compartida entre CPU y GPU
+    - GPU Maxwell (128 CUDA cores) modesta, pero suficiente
+    - TensorRT disponible si se necesita más velocidad
+
+  Filtro bandpass y CRNN:
+    - La CRNN fue entrenada con datos SIN filtrar
+    - Alimentar datos filtrados degradaría el rendimiento
+    - Rama de datos RAW es obligatoria
+
+  Detección vs alerta temprana:
+    - Con un solo sensor: detección y alerta local
+    - Sin estimación de magnitud ni epicentro
+    - Para eso se requiere red de múltiples sensores
+
+
+5. SUGERENCIAS PARA COMPLETAR EL PROYECTO
+================================================================================
+
+5.1 CORTO PLAZO — Entrenamiento final (1 semana)
+--------------------------------------------------------------------------------
+
+  - Descargar datos K-NET de 2020-2023 desde NIED para alcanzar ≥316
+    eventos EQ. Idealmente 500+ para mayor robustez.
+  - Colocar en DATA/EQ-2023/, DATA/EQ-2022/, etc.
+  - Ejecutar: bash run_training.sh
+  - Verificar métricas: AUROC ≥0.999, Precision ≥97%, FAR <0.1%
+  - Generar gráficas: python3 plot_results.py
+
+5.2 CORTO PLAZO — Sistema en tiempo real (1-2 semanas)
+--------------------------------------------------------------------------------
+
+  - Desarrollar la clase CrowdQuakeCRNN con el modelo validado
+  - Integrar con el lector serial del ADXL335 (ya funcional en
+    test_adxl335.py, mismo pipeline de lectura)
+  - Implementar la lógica STA/LTA → CRNN en un script principal
+  - Probar con datos en vivo del ADXL335: golpes en mesa, caminar,
+    y comparar con grabaciones de sismos reales reproducidas
+
+5.3 MEDIANO PLAZO — Optimización para producción (2-4 semanas)
+--------------------------------------------------------------------------------
+
+  - Convertir modelo a TFLite (FP16) para reducir latencia y memoria
+  - Recolectar datos de no-terremoto locales con el ADXL335 en el
+    sitio de instalación (mínimo 7 días de grabación continua)
+  - Re-entrenar con datos locales para reducir falsas alarmas
+  - Agregar logging de eventos y métricas de rendimiento
+
+5.4 LARGO PLAZO — Escalamiento
+--------------------------------------------------------------------------------
+
+  - Desplegar múltiples nodos ADXL335/Arduino/Jetson
+  - Cada nodo ejecuta CRNN localmente (edge computing)
+  - Servidor central confirma con votación (N de M nodos)
+  - Esto replica la arquitectura de CrowdQuake y reduce falsas
+    alarmas drásticamente
+
+================================================================================
+FIN DEL DOCUMENTO
+================================================================================
