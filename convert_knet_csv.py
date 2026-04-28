@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE, 'DATA')
+DATA_DIR = os.path.join(BASE, 'CSV-Data')
 OUTPUT_DIR = os.path.join(BASE, 'EQ')
 GAL_TO_G = 1.0 / 980.665
 
